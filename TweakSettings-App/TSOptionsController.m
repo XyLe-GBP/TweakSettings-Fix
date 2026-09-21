@@ -114,6 +114,8 @@
 - (void)_checkForUpdates {
     NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     [configuration setRequestCachePolicy:NSURLRequestReloadIgnoringCacheData];
+    configuration.timeoutIntervalForRequest = 20;
+    configuration.timeoutIntervalForResource = 30;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
     NSURL *latestReleaseURL = [NSURL URLWithString:@"https://api.creaturecoding.com/info/package?id=tweaksettings&key=package.version"];
 
@@ -131,14 +133,15 @@
             });
         };
 
-        if (!data || error) {
+        NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+        if (!data || error || status < 200 || status >= 300) {
             updateAlert(nil, nil, YES);
             return;
         }
 
         NSString *key = @"version";
         NSDictionary *release = [NSJSONSerialization JSONObjectWithData:data options:(NSJSONReadingOptions)0 error:nil];
-        if (!release || !release[key] || ![release[key] length]) {
+        if (![release isKindOfClass:NSDictionary.class] || ![release[key] isKindOfClass:NSString.class] || ![release[key] length]) {
             updateAlert(nil, nil, YES);
             return;
         }
@@ -146,7 +149,7 @@
         NSString *message;
         NSString *releaseVersion = release[key];
         NSString *localVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-        BOOL updateAvailable = ![releaseVersion isEqualToString:localVersion];
+        BOOL updateAvailable = [releaseVersion compare:localVersion options:NSNumericSearch] == NSOrderedDescending;
 
         message = [NSString stringWithFormat:updateAvailable
                         ? NSLocalizedString(CHECK_FOR_UPDATES_FAIL_MESSAGE_KEY, nil)
@@ -155,6 +158,7 @@
         updateAlert(nil, message, NO);
 
     }] resume];
+    [session finishTasksAndInvalidate];
 }
 
 @end

@@ -16,11 +16,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-#define NAVIGATION_MANAGER APP_DELEGATE.navigationController
+#define NAVIGATION_MANAGER APP_DELEGATE.navigationManager
 
 @interface TSRootNavigationManager : NSObject
 
-@property(nonatomic, strong) NSURL *deferredLoadURL;
+@property(nonatomic, strong, nullable) NSURL *deferredLoadURL;
 
 @property(nonatomic, strong, readonly) TSPrefsRootController *rootController;
 @property(nonatomic, strong, readonly) TSRootListController *rootListController;

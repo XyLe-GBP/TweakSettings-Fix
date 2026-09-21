@@ -77,8 +77,5 @@
             <string>kTCCServiceMediaLibrary</string>
         </array>
 
-        <!--    Allow oppening application urls    -->
-        <key>com.apple.springboard.opensensitiveurl</key>
-        <true/>
     </dict>
 </plist>

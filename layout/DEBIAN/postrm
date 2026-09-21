@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    remove|purge)
+        if [ -x /var/jb/usr/bin/uicache ]; then
+            /var/jb/usr/bin/uicache -u /var/jb/Applications/TweakSettings.app
+        fi
+        ;;
+esac

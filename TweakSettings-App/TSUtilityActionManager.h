@@ -26,14 +26,14 @@ extern NSString *const TSActionTypeReboot;
 extern NSString *const TSActionTypeUserspaceReboot;
 extern NSString *const TSActionTypeTweakInject;
 
-extern struct TaskResult ExecuteCommand(NSString *command);
+extern struct TaskResult ExecuteAction(NSString *actionType);
 extern NSString *TitleForActionType(NSString *type);
 extern NSString *SubtitleForActionType(NSString *type);
 extern BOOL CanRunWithoutConfirmation(NSString *actionType);
-extern int HandleActionForType(NSString *actionType);
+extern void HandleActionForType(NSString *actionType);
 extern UIAlertController *ActionAlertForType(NSString *actionType);
 extern UIAlertController *ActionListAlert(void);
 extern UIMenu *ActionListMenu(void) API_AVAILABLE(ios(13.0));
-extern NSString *CommandForActionType(NSString *actionType);
+
 
 #endif /* TSActionType_h */

@@ -15,11 +15,7 @@
 #import "TSRootNavigationManager.h"
 #import "TSUserDefaults.h"
 #import "TSOptionsController.h"
-
-@interface UIBarButtonItem (iOS13)
-- (id)initWithTitle:(NSString *)table menu:(UIMenu *)menu API_AVAILABLE(ios(13.0));
-@end
-
+#import "../Shared/TSPreferenceSupport.h"
 
 @implementation TSRootListController {
 
@@ -60,6 +56,7 @@
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(_preferencesChanged) name:TSUserDefaultsChangedKey object:nil];
 
     _rootListLoaded = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{ [APP_DELEGATE.navigationManager processDeferredURL:NO]; });
 }
 
 #pragma mark - PSListController
@@ -86,9 +83,15 @@
 
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
 
-    if (!cell.gestureRecognizers.count) {
+    BOOL hasLongPress = NO;
+    for (UIGestureRecognizer *gesture in cell.gestureRecognizers) {
+        if ([gesture isKindOfClass:UILongPressGestureRecognizer.class] && gesture.delegate == self) hasLongPress = YES;
+    }
+    if (!hasLongPress) {
 
-        [cell addGestureRecognizer:[[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(_handleCellLongPress:)]];
+        UILongPressGestureRecognizer *gesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(_handleCellLongPress:)];
+        gesture.delegate = self;
+        [cell addGestureRecognizer:gesture];
     }
 
     return cell;
@@ -96,15 +99,13 @@
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 
-    if (self.splitViewController.collapsed) {
-
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    if (specifier.cellType != PSLinkCell && specifier.cellType != PSLinkListCell) {
         [super tableView:tableView didSelectRowAtIndexPath:indexPath];
-
-    } else {
-
-        PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
-        [APP_DELEGATE.navigationManager pushDetailControllerForSpecifier:specifier];
+        return;
     }
+    [APP_DELEGATE.navigationManager pushDetailControllerForSpecifier:specifier];
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
 #pragma mark - Private Methods
@@ -113,6 +114,8 @@
 
     _specifiers = nil;
     [self reloadSpecifiers];
+    [self refreshSearchResults];
+    [_refreshControl endRefreshing];
 }
 
 - (void)_handleCellLongPress:(UILongPressGestureRecognizer *)sender {
@@ -123,9 +126,11 @@
 
         CGPoint point = [sender locationInView:self.table];
         NSIndexPath *indexPath = [self.table indexPathForRowAtPoint:point];
+        if (!indexPath) return;
         PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
-        NSString *urlString = [NSString stringWithFormat:@"prefs:root=%@", specifier.identifier];
-        NSURL *url = [NSURL URLWithString:[urlString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]]];
+        if (!specifier.identifier.length) return;
+        NSString *urlString = [TSPreferenceURL(@[specifier.identifier]).absoluteString stringByReplacingOccurrencesOfString:@"tweaks:" withString:@"prefs:" options:NSAnchoredSearch range:NSMakeRange(0, 7)];
+        NSURL *url = [NSURL URLWithString:urlString];
 
         [APP_DELEGATE openApplicationURL:url];
     }

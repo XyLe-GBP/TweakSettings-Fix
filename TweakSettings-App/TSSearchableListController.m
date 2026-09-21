@@ -48,6 +48,8 @@
     _searchController.hidesNavigationBarDuringPresentation = NO;
     _searchController.obscuresBackgroundDuringPresentation = NO;
     _searchController.searchBar.delegate = self;
+    _searchController.delegate = self;
+    self.definesPresentationContext = YES;
 
     if (@available(iOS 11.0, *)) {
         self.navigationItem.searchController = _searchController;
@@ -56,7 +58,7 @@
         self.table.tableHeaderView = _searchController.searchBar;
     }
 
-    self.unfilteredSpecifiers = self.specifiers;
+    self.unfilteredSpecifiers = self.specifiers.mutableCopy;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -87,45 +89,27 @@
 
 #pragma mark - UISearchResultsUpdating
 
-- (void)updateSearchResultsForSearchController:(nonnull UISearchController *)searchController {
-
-    __block NSString *searchText = searchController.searchBar.text;
-    if (searchText && searchText.length > 0) {
-
-        HIGH_QUEUE(^{
-            NSPredicate *predicate = [NSPredicate predicateWithFormat:@"SELF.name contains[cd] %@", searchText];
-            __block NSMutableArray *filteredSpecifiers = [self.unfilteredSpecifiers filteredArrayUsingPredicate:predicate].mutableCopy;
-
-            MAIN_QUEUE_UNSAFE(^{
-                self.specifiers = filteredSpecifiers;
-                [self.table reloadData];
-            });
-        });
-    } else {
-
-        MAIN_QUEUE_UNSAFE(^{
-            self.specifiers = self.unfilteredSpecifiers;
-            [self.table reloadData];
-        });
-    }
+- (void)refreshSearchResults {
+    // Preference lists are small; synchronous filtering avoids stale background results
+    // overwriting a newer query or a freshly reloaded package list.
+    NSString *text = _searchController.searchBar.text;
+    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"name CONTAINS[cd] %@", text ?: @""];
+    self.specifiers = text.length ? [self.unfilteredSpecifiers filteredArrayUsingPredicate:predicate].mutableCopy : self.unfilteredSpecifiers.mutableCopy;
+    [self.table reloadData];
 }
 
-#pragma mark - UISearchControllerDelegate
+- (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
+    [self refreshSearchResults];
+}
 
 - (void)didDismissSearchController:(UISearchController *)searchController {
-
-    MAIN_QUEUE_UNSAFE(^{
-        self.specifiers = self.unfilteredSpecifiers;
-        [self.table reloadData];
-    });
+    self.specifiers = self.unfilteredSpecifiers.mutableCopy;
+    [self.table reloadData];
 }
 
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
-
-    MAIN_QUEUE_UNSAFE(^{
-        self.specifiers = self.unfilteredSpecifiers;
-        [self.table reloadData];
-    });
+    searchBar.text = @"";
+    [self refreshSearchResults];
 }
 
 @end

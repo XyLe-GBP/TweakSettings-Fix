@@ -22,14 +22,19 @@ int main(int argc, char *argv[]) {
         // Setup code that might create autoreleased objects goes here.
         appDelegateClassName = NSStringFromClass([TSAppDelegate class]);
 
-        NSArray *librariesToLoad = ARRAY_WITH_PLIST(ROOT_PATH_NS(@"/Applications/TweakSettings.app/libraries.plist"));
+        NSArray *librariesToLoad = ARRAY_WITH_PLIST([NSBundle.mainBundle pathForResource:@"libraries" ofType:@"plist"]);
 
         for (NSString *path in librariesToLoad) {
-            dlopen(ROOT_PATH_NS_VAR(path).UTF8String, RTLD_NOW);
+            if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath) continue;
+            NSString *resolvedPath = ROOT_PATH_NS_VAR(path);
+            if (!resolvedPath.length) continue;
+            if (!dlopen(resolvedPath.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL)) {
+                NSLog(@"TweakSettings: unable to load %@: %s", resolvedPath, dlerror());
+            }
         }
 
     }
 
-    return UIApplicationMain(argc, argv, appDelegateClassName, appDelegateClassName);
+    return UIApplicationMain(argc, argv, nil, appDelegateClassName);
 
 }

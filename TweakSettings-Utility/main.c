@@ -3,232 +3,99 @@
 #include <sysexits.h>
 #include <unistd.h>
 #include <string.h>
-#include <dlfcn.h>
 #include <sys/stat.h>
-
-#import "rootless.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <grp.h>
+#if __has_include(<libproc.h>)
+#include <libproc.h>
+#else
+// libproc is exported by libSystem on iOS, but omitted from Apple's public SDK.
+#include <stdint.h>
+#define PROC_PIDPATHINFO_MAXSIZE 4096
+int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+#endif
+#include "../Shared/TSUtilitySupport.h"
 
-int proc_pidpath(pid_t pid, void *buffer, uint32_t buffersize);
-
-typedef enum {
-	TSUtilityActionTypeNone,
-	TSUtilityActionTypeHelp,
-	TSUtilityActionTypeRespring,
-	TSUtilityActionTypeSafemode,
-	TSUtilityActionTypeUICache,
-	TSUtilityActionTypeLDRestart,
-	TSUtilityActionTypeReboot,
-	TSUtilityActionTypeUSReboot,
-	TSUtilityActionTypeTweakinject,
-	TSUtilityActionTypeSubstrated
-} TSUtilityActionType;
-
-// patch setuid for electra based jailbreaks
-void patch_setuid(uid_t user) {
-	
-	void* handle = dlopen("/usr/lib/libjailbreak.dylib", RTLD_LAZY);
-	if (!handle) { return; }
-
-	typedef void (*fix_setuid_prt_t)(__attribute__((unused)) pid_t pid);
-	typedef void (*fix_entitle_prt_t)(__attribute__((unused)) pid_t pid, __attribute__((unused)) uint32_t what);
-	fix_setuid_prt_t setuidptr = (fix_setuid_prt_t)dlsym(handle, "jb_oneshot_fix_setuid_now");
-	fix_entitle_prt_t entitleptr = (fix_entitle_prt_t)dlsym(handle, "jb_oneshot_entitle_now");
-
-	setuidptr(getpid());
-	setuid(user);
-
-	if (dlerror()) { return; }
-
-	entitleptr(getpid(), (1 << 1));
+static int fail(const char *operation) {
+    fprintf(stderr, "tweaksettings-utility: %s: %s\n", operation, strerror(errno));
+    return EX_OSERR;
 }
 
-// prints help text
-void print_usage() {
-	printf("tweaksettings-utility usage:\n\n");
-	printf("[--respring]:\n\trespring the device\n");
-	printf("[--safemode]:\n\tenter safemode on the device\n");
-	printf("[--uicache]:\n\trun uicache on the device\n");
-	printf("[--ldrestart]:\n\trun ldrestart on the device\n");
-	printf("[--reboot]:\n\treboot the device\n");
-	printf("[--usreboot]:\n\tuserspace reboot the device\n");
-	printf("[--tweakinject]:\n\ttoggle tweakinject on the device (libhooker only)\n");
-	printf("[--help]:\n\tshows this help text\n\n");
-	printf("tweaksettings-utility is for use only by TweakSettings\n\n");
+static bool authorized_parent(void) {
+    char parentPath[PROC_PIDPATHINFO_MAXSIZE] = {0};
+    char expectedPath[PATH_MAX], actualPath[PATH_MAX];
+    struct stat expected, actual;
+    if (proc_pidpath(getppid(), parentPath, sizeof(parentPath)) <= 0 ||
+        !realpath(ROOT_PATH("/Applications/TweakSettings.app/TweakSettings"), expectedPath) ||
+        !realpath(parentPath, actualPath) || strcmp(expectedPath, actualPath) != 0 ||
+        stat(expectedPath, &expected) != 0 || stat(actualPath, &actual) != 0) return false;
+    return S_ISREG(expected.st_mode) && expected.st_uid == 0 &&
+           (expected.st_mode & (S_IWGRP | S_IWOTH)) == 0 &&
+           expected.st_dev == actual.st_dev && expected.st_ino == actual.st_ino;
 }
 
-int status_for_cmd(const char *cmd) {
-    FILE *proc = popen(cmd, "r");
-
-    if (!proc) {return EXIT_FAILURE;}
-
-    int size = 1024;
-    char data[size];
-    while (fgets(data, size, proc) != NULL) {}
-
-    return pclose(proc);
+static int execute(const char *path, const char *argument, const char *secondArgument) {
+    char *args[] = {(char *)path, (char *)argument, (char *)secondArgument, NULL};
+    // Do not pass the caller's PATH, shell startup settings, or DYLD variables to root tools.
+    char *environment[] = {"PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                           "HOME=/var/root", "LANG=C", NULL};
+    execve(path, args, environment);
+    return fail(path);
 }
 
-int check_fork(pid_t pid) {
-    if (pid != 0) {
-        printf("tweaksettings-utility fork error (%s) (%d),\n", strerror(errno), errno);
+static int toggle_injection(void) {
+    const char *path = ROOT_PATH("/basebin/.safe_mode");
+    struct stat info;
+    bool wasDisabled = lstat(path, &info) == 0;
+    if (wasDisabled) {
+        if (!S_ISREG(info.st_mode)) {
+            fprintf(stderr, "tweaksettings-utility: invalid safe-mode marker\n");
+            return EX_DATAERR;
+        }
+        if (unlink(path) != 0) return fail("enable tweak injection");
+    } else {
+        if (errno != ENOENT) return fail("read tweak injection state");
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+        if (fd < 0) return fail("disable tweak injection");
+        if (close(fd) != 0) return fail("close safe-mode marker");
     }
-
-    return pid;
+    // This is Dopamine's own userspace-reboot entry point.
+    return execute(ROOT_PATH("/basebin/jbctl"), "reboot_userspace", NULL);
 }
 
-int wait_pid(pid_t pid) {
-    int wait;
-    int status;
-    if ((wait = waitpid (pid, &status, 0)) == -1)
-        printf("tweaksettings-utility wait error (%s) (%d),\n", strerror(errno), errno);
-    if (wait == pid) {
-        return 0;
+int main(int argc, char **argv) {
+    if (argc == 1 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
+        puts("tweaksettings-utility: --respring --safemode --uicache --ldrestart --reboot --usreboot --tweakinject");
+        return EX_OK;
     }
-    return -1;
-}
-
-int main(int argc, char **argv, char **envp) {
-
-	// check that TweakSettings.app exists
-	struct stat correct;
-	if (lstat(ROOT_PATH("/Applications/TweakSettings.app/TweakSettings"), &correct) == -1){
-		printf("tweaksettings-utility can only be used by TweakSettings.app,\n");
-		return EX_NOPERM;
-	}
-
-	pid_t parent = getppid();
-	bool tweaksettings = false;
-
-	// check that TweakSettings.app is the parent process pid
-	char buffer[(1024)] = {0};
-	int pidpath = proc_pidpath(parent, buffer, sizeof(buffer));
-	if (pidpath > 0){
-		if (strcmp(buffer, ROOT_PATH("/Applications/TweakSettings.app/TweakSettings")) == 0){
-			tweaksettings = true;
-		}
-	}
-
-	// exit if the parent process was not TweakSettings.app
-	if (tweaksettings == false){
-		printf("tweaksettings-utility can only be used by TweakSettings.app,\n");
-		return EX_NOPERM;
-	}
-	
-	// patch setuid if needed
-	patch_setuid(0);
-
-	// get root:wheel 
-	setuid(0);
-	setgid(0);
-
-	// some permissions issue prevented getting root:wheel
-	// exit the program with a permissions error
-	if (getuid() != 0 || getgid() != 0) {
-		printf("the more you get,\n");
-		printf("the less you are.\n");
-		return EX_NOPERM;
-	}
-
-	// show help text if no arguments were supplied
-	if (argc < 2) {
-		print_usage();
-		return EX_OK;
-	}
-
-	// parse cmd args and set the operation flags
-	TSUtilityActionType flags =
-			strcmp(argv[1], "--respring") == 0 ? TSUtilityActionTypeRespring :
-			strcmp(argv[1], "--safemode") == 0 ? TSUtilityActionTypeSafemode :
-			strcmp(argv[1], "--uicache") == 0 ? TSUtilityActionTypeUICache :
-			strcmp(argv[1], "--ldrestart") == 0 ? TSUtilityActionTypeLDRestart :
-			strcmp(argv[1], "--reboot") == 0 ? TSUtilityActionTypeReboot :
-			strcmp(argv[1], "--usreboot") == 0 ? TSUtilityActionTypeUSReboot :
-			strcmp(argv[1], "--tweakinject") == 0 ? TSUtilityActionTypeTweakinject :
-			strcmp(argv[1], "--substrated") == 0 ? TSUtilityActionTypeSubstrated :
-			strcmp(argv[1], "--help") == 0 ? TSUtilityActionTypeHelp :
-			TSUtilityActionTypeNone;
-
-	int status = EX_UNAVAILABLE;
-
-	// handle operation execution
-	switch (flags) {
-		case TSUtilityActionTypeNone: {
-			printf("invalid arguments, canceling operation\n");
-		} break;
-		case TSUtilityActionTypeHelp: {
-			print_usage();
-		} break;
-		case TSUtilityActionTypeRespring: {
-            status = execl(ROOT_PATH("/usr/bin/killall"), "killall", "backboardd", NULL);
-		} break;
-		case TSUtilityActionTypeSafemode: {
-		    status = execl(ROOT_PATH("/usr/bin/killall"), "killall", "-SEGV", "SpringBoard", NULL);
-		} break;
-		case TSUtilityActionTypeUICache: {
-		    status = execl(ROOT_PATH("/usr/bin/uicache"), "uicache", NULL);
-		} break;
-		case TSUtilityActionTypeReboot: {
-		    status = execl(ROOT_PATH("/usr/sbin/reboot"), "reboot", NULL);
-		} break;
-		case TSUtilityActionTypeLDRestart: {
-		    status = execl(ROOT_PATH("/usr/bin/ldrestart"), "ldrestart", NULL);
-		} break;
-		case TSUtilityActionTypeUSReboot: {
-            status = execl(ROOT_PATH("/usr/bin/launchctl"), "launchctl", "reboot", "userspace", NULL);
-		} break;
-		case TSUtilityActionTypeTweakinject: {
-            if (access("/var/jb/.installed_dopamine", F_OK) == 0) {
-                pid_t cpid = fork();
-                if (cpid == 0) {
-                    status = access("/var/jb/basebin/.safe_mode", F_OK) == 0
-                            ? execl(ROOT_PATH("/bin/rm"), "rm", "-f", "/var/jb/basebin/.safe_mode", NULL)
-                            : execl(ROOT_PATH("/bin/touch"), "touch", "/var/jb/basebin/.safe_mode", NULL);
-                }
-
-                if (wait_pid(cpid) == 0) {
-                    status = execl(ROOT_PATH("/usr/bin/launchctl"), "launchctl", "reboot", "userspace", NULL);
-                }
-            } else if (access(ROOT_PATH("/usr/lib/TweakInject.dylib"), F_OK) == 0) {
-                pid_t cpid = fork();
-
-                if (cpid == 0) {
-                    status = access(ROOT_PATH("/.disable_tweakinject"), F_OK) == 0
-                            ? execl(ROOT_PATH("/bin/rm"), "rm", "-f", ROOT_PATH("/.disable_tweakinject"), NULL)
-                            : execl(ROOT_PATH("/bin/touch"), "touch", ROOT_PATH("/.disable_tweakinject"), NULL);
-                }
-
-                if (wait_pid(cpid) == 0) {
-                    status = execl(ROOT_PATH("/usr/bin/killall"), "killall", "backboardd", NULL);
-                }
-			} else {
-                pid_t cpid = fork();
-
-                if (cpid == 0) {
-                    status = access(ROOT_PATH("/var/tmp/.substrated_disable_loader"), F_OK) == 0
-                            ? execl(ROOT_PATH("/bin/rm"), "rm", "-f", ROOT_PATH("/var/tmp/.substrated_disable_loader"), NULL)
-                            : execl(ROOT_PATH("/bin/touch"), "touch", ROOT_PATH("/var/tmp/.substrated_disable_loader"), NULL);
-                }
-
-                if (wait_pid(cpid) == 0) {
-                    cpid = fork();
-
-                    if (cpid == 0) {
-                        status = execl(ROOT_PATH("/etc/rc.d/substrate"), "substrate", NULL);
-                    }
-
-                    if (wait_pid(cpid) == 0) {
-                        status = execl(ROOT_PATH("/usr/bin/killall"), "killall", "backboardd", NULL);
-                    }
-                }
-			}
-		} break;
-		case TSUtilityActionTypeSubstrated: {
-			if (access("/etc/rc.d/substrate", F_OK) == 0) {
-				execl("/etc/rc.d/substrate", "substrate", NULL);
-			}
-		} break;
-	}
-	
-	return status;
+    if (argc != 2 || strncmp(argv[1], "--", 2) != 0 || !TSIsKnownAction(argv[1] + 2)) {
+        fputs("tweaksettings-utility: invalid action\n", stderr);
+        return EX_USAGE;
+    }
+    if (!authorized_parent()) {
+        fputs("tweaksettings-utility: only the installed TweakSettings app may request actions\n", stderr);
+        return EX_NOPERM;
+    }
+    if (geteuid() != 0 || setgroups(0, NULL) != 0 || setgid(0) != 0 || setuid(0) != 0) {
+        fputs("tweaksettings-utility: cannot obtain root credentials; reinstall the package\n", stderr);
+        return EX_NOPERM;
+    }
+    umask(022);
+    const char *action = argv[1] + 2;
+    if (!TSActionIsAvailable(action)) {
+        fputs("tweaksettings-utility: action unavailable on this jailbreak\n", stderr);
+        return EX_UNAVAILABLE;
+    }
+    if (!strcmp(action, "respring")) {
+        if (TSIsDopamine()) return execute(ROOT_PATH("/basebin/jbctl"), "respring", NULL);
+        if (access(ROOT_PATH("/usr/bin/sbreload"), X_OK) == 0) return execute(ROOT_PATH("/usr/bin/sbreload"), NULL, NULL);
+        return execute(ROOT_PATH("/usr/bin/killall"), "backboardd", NULL);
+    }
+    if (!strcmp(action, "safemode")) return execute(ROOT_PATH("/usr/bin/killall"), "-SEGV", "SpringBoard");
+    if (!strcmp(action, "uicache")) return execute(ROOT_PATH("/usr/bin/uicache"), "-a", NULL);
+    if (!strcmp(action, "reboot")) return execute(ROOT_PATH("/usr/sbin/reboot"), NULL, NULL);
+    if (!strcmp(action, "ldrestart")) return execute(ROOT_PATH("/usr/bin/ldrestart"), NULL, NULL);
+    if (!strcmp(action, "usreboot")) return execute(ROOT_PATH("/basebin/jbctl"), "reboot_userspace", NULL);
+    return toggle_injection();
 }

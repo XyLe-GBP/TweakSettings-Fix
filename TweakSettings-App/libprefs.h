@@ -11,6 +11,7 @@
 @interface PSListController (libprefs)
 - (NSArray *)specifiersFromEntry:(NSDictionary *)entry sourcePreferenceLoaderBundlePath:(NSString *)sourceBundlePath title:(NSString *)title;
 - (PSViewController *)controllerForSpecifier:(PSSpecifier *)specifier;
+- (void)lazyLoadBundle:(PSSpecifier *)specifier;
 @end
 
 @interface PSSpecifier (libprefs)

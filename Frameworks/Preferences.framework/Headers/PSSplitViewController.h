@@ -20,5 +20,5 @@
 - (void)setNavigationDelegate:(id<PSSplitViewControllerNavigationDelegate>)arg1 ;
 - (void)setContainerNavigationController:(PSRootController *)arg1 ;
 - (void)setupControllerForToolbar:(id)arg1 ;
-- (NSUInteger)supportedInterfaceOrientations;
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations;
 @end

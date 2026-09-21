@@ -15,10 +15,11 @@
 #import "TSRootListController.h"
 #import "TSPackageUtility.h"
 #import "TSSplitViewController.h"
+#import "TSAppDelegate.h"
+#import "../Shared/TSPreferenceSupport.h"
 
 @interface TSRootNavigationManager () <UISplitViewControllerDelegate, PSSplitViewControllerNavigationDelegate, UINavigationControllerDelegate>
 
-@property(nonatomic, strong, readonly) NSArray<PSViewController *> *navigationStack;
 @property(nonatomic, strong, readonly) PSListController *blankListController;
 
 @end
@@ -32,15 +33,15 @@
         _blankListController = PSListController.new;
         _splitController = TSSplitViewController.new;
         _rootListController = TSRootListController.new;
-        _navigationController = [[UINavigationController alloc] initWithRootViewController:_rootListController];
+        _navigationController = [[TSPrefsRootController alloc] initWithRootViewController:_rootListController rootListController:_rootListController];
         _rootController = [[TSPrefsRootController alloc] initWithRootViewController:_blankListController rootListController:_rootListController];
         _rootListController.rootController = _rootController;
         _splitController.delegate = self;
-        _splitController.navigationDelegate = self;
-        _splitController.preferredDisplayMode = UISplitViewControllerDisplayModeAllVisible;
-        _splitController.containerNavigationController = _rootController;
+        if ([_splitController respondsToSelector:@selector(setNavigationDelegate:)]) _splitController.navigationDelegate = self;
+        _splitController.preferredDisplayMode = UISplitViewControllerDisplayModeOneBesideSecondary;
+        if ([_splitController respondsToSelector:@selector(setContainerNavigationController:)]) _splitController.containerNavigationController = _rootController;
         [_splitController setViewControllers:@[_navigationController, _rootController]];
-        [_rootController setSupportedInterfaceOrientations:_splitController.supportedInterfaceOrientations];
+        if ([_rootController respondsToSelector:@selector(setSupportedInterfaceOrientations:)]) [_rootController setSupportedInterfaceOrientations:_splitController.supportedInterfaceOrientations];
         _navigationController.delegate = self;
         _rootController.delegate = self;
     }
@@ -52,28 +53,27 @@
 
 - (BOOL)splitViewController:(UISplitViewController *)splitViewController collapseSecondaryViewController:(UIViewController *)secondaryViewController ontoPrimaryViewController:(UIViewController *)primaryViewController
 {
-    [self _getCurrentNavigationStack];
-    [_rootController setViewControllers:_navigationStack animated:NO];
-    return NO;
+    NSArray *details = [_rootController.viewControllers filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(UIViewController *controller, NSDictionary *bindings) {
+        return controller != self->_blankListController;
+    }]];
+    // Move controllers between navigation stacks instead of nesting navigation controllers.
+    [_rootController setViewControllers:@[_blankListController] animated:NO];
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:_rootListController];
+    [stack addObjectsFromArray:details];
+    [self _assignRootController:(PSRootController *)_navigationController toControllers:stack];
+    [_navigationController setViewControllers:stack animated:NO];
+    return YES;
 }
 
-- (UIViewController *)splitViewController:(UISplitViewController *)splitViewController separateSecondaryViewControllerFromPrimaryViewController:(UIViewController *)primaryViewController
-{
-
-    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"NOT (SELF isKindOfClass: %@) && SELF != %@", UINavigationController.class, _rootListController];
-    NSMutableArray *viewControllers = [_rootListController.navigationController.viewControllers filteredArrayUsingPredicate:predicate].mutableCopy;
-
-    if (!viewControllers || !viewControllers.count) {
-
-        viewControllers = (_navigationStack && _navigationStack.count ? _navigationStack : @[_blankListController]).mutableCopy;
-    }
-
-    [_navigationController popToRootViewControllerAnimated:NO];
-    [_rootController setViewControllers:viewControllers animated:NO];
-
+- (UIViewController *)splitViewController:(UISplitViewController *)splitViewController separateSecondaryViewControllerFromPrimaryViewController:(UIViewController *)primaryViewController {
+    NSMutableArray *details = _navigationController.viewControllers.mutableCopy;
+    [details removeObject:_rootListController];
+    [_navigationController setViewControllers:@[_rootListController] animated:NO];
+    _rootListController.rootController = _rootController;
+    [self _assignRootController:_rootController toControllers:details];
+    [_rootController setViewControllers:details.count ? details : @[_blankListController] animated:NO];
     [self _resetNavigationAppearance:_navigationController];
     [self _resetNavigationAppearance:_rootController];
-
     return _rootController;
 }
 
@@ -88,8 +88,6 @@
 #pragma mark - UINavigationControllerDelegate
 
 - (void)navigationController:(UINavigationController *)navigationController didShowViewController:(UIViewController *)viewController animated:(BOOL)animated {
-    [self _getCurrentNavigationStack];
-
     if (_deferredLoadURL) {
 
        [self processDeferredURL:NO];
@@ -114,48 +112,59 @@
 }
 
 - (NSURL *)urlForCurrentNavStack {
-    NSMutableString *path = @"tweaks:root=".mutableCopy;
-    NSArray *viewControllers = self.topNavigationController.viewControllers;
-
-    for (int i = 1; i < viewControllers.count; ++i) {
-        PSViewController *controller = viewControllers[(NSUInteger) i];
-        if (!controller.specifier) continue;
-        [path appendFormat:(i > 1 ? @"/%@" : @"%@"), controller.specifier.identifier];
+    NSMutableArray *identifiers = [NSMutableArray array];
+    for (UIViewController *controller in self.topNavigationController.viewControllers) {
+        if (controller == _rootListController || controller == _blankListController || ![controller isKindOfClass:PSViewController.class]) continue;
+        NSString *identifier = [(PSViewController *)controller specifier].identifier;
+        if (!identifier.length) break;
+        [identifiers addObject:identifier];
     }
-
-    return [NSURL URLWithString:[path stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLFragmentAllowedCharacterSet]];
+    return TSPreferenceURL(identifiers);
 }
 
 - (void)processDeferredURL:(BOOL)animated {
-    [self processURL:_deferredLoadURL animated:animated];
-    _deferredLoadURL = nil;
+    if (!_rootListController.rootListLoaded || !_deferredLoadURL) return;
+    NSURL *url = _deferredLoadURL;
+    _deferredLoadURL = nil; // Clear before changing controllers, which invokes the delegate again.
+    [self processURL:url animated:animated];
 }
 
 - (void)processURL:(NSURL *)url animated:(BOOL)animated {
-    if (!url) return;
-
-    NSString * pathString = [url.absoluteString.stringByRemovingPercentEncoding stringByReplacingOccurrencesOfString:@"tweaks:root=" withString:@""];
-    NSArray *components = [pathString componentsSeparatedByString:@"/"];
-    NSMutableArray *controllers = [NSMutableArray new];
+    NSArray *components = TSPreferenceIdentifiers(url);
+    if (!components) return;
+    if (!_rootListController.rootListLoaded) {
+        self.deferredLoadURL = url;
+        return;
+    }
+    NSMutableArray *controllers = [NSMutableArray array];
     PSListController *parentController = _rootListController;
-
-    for (NSString *identifier in components)
-    {
-        if (!parentController) break;
-        PSSpecifier *specifier = [parentController specifierForID:identifier];
-        if (!specifier) break;
+    for (NSString *identifier in components) {
+        if (!parentController) return;
+        PSSpecifier *specifier = nil;
+        // Deep links must also find items hidden by the current search query.
+        if (parentController == _rootListController) {
+            for (PSSpecifier *candidate in _rootListController.unfilteredSpecifiers) {
+                if ([candidate.identifier isEqualToString:identifier]) { specifier = candidate; break; }
+            }
+        } else {
+            @try {
+                [parentController loadViewIfNeeded];
+                [parentController specifiers];
+                specifier = [parentController specifierForID:identifier];
+            } @catch (NSException *exception) {
+                NSLog(@"TweakSettings: cannot navigate preferences: %@", exception.reason);
+                [self _showLoadError:parentController.specifier];
+                return;
+            }
+        }
+        if (!specifier) return;
         PSViewController *controller = [TSPackageUtility controllerForSpecifier:specifier inController:parentController];
-        if (!controller) break;
+        if (!controller) { [self _showLoadError:specifier]; return; }
         [controllers addObject:controller];
-
-        parentController = ([controller isKindOfClass:PSListController.class]) ? (PSListController *)controller : nil;
+        parentController = [controller isKindOfClass:PSListController.class] ? (PSListController *)controller : nil;
     }
-
-    if (self.isCollapsed) {
-
-        [controllers insertObject:_rootListController atIndex:0];
-    }
-
+    if (self.isCollapsed) [controllers insertObject:_rootListController atIndex:0];
+    else if (!controllers.count) [controllers addObject:_blankListController];
     [self.topNavigationController setViewControllers:controllers animated:animated];
 }
 
@@ -164,12 +173,22 @@
 
     if (controller) {
 
-        [self.topNavigationController setViewControllers:@[controller] animated:NO];
+        if (self.isCollapsed) [self.topNavigationController pushViewController:controller animated:YES];
+        else [self.topNavigationController setViewControllers:@[controller] animated:NO];
         [self _resetNavigationAppearance:self.rootController];
+    } else {
+        [self _showLoadError:specifier];
     }
 }
 
 #pragma mark - Private Methods
+
+- (void)_showLoadError:(PSSpecifier *)specifier {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"PREFERENCE_LOAD_FAILED_TITLE", nil) message:[NSString stringWithFormat:NSLocalizedString(@"PREFERENCE_LOAD_FAILED_MESSAGE", nil), specifier.name ?: @""] preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"ALERT_DISMISS_TITLE_KEY", nil) style:UIAlertActionStyleCancel handler:nil]];
+    [APP_DELEGATE presentViewController:alert];
+}
+
 
 - (void)_resetNavigationAppearance:(UINavigationController *)controller {
     [controller.navigationBar setBackgroundImage:nil forBarMetrics:UIBarMetricsDefault];
@@ -177,16 +196,21 @@
     [controller.navigationBar setTintColor:nil];
     [controller.navigationBar setBarTintColor:nil];
     [controller.navigationBar setTitleTextAttributes:nil];
+    UINavigationBarAppearance *appearance = [UINavigationBarAppearance new];
+    [appearance configureWithDefaultBackground];
+    controller.navigationBar.standardAppearance = appearance;
+    controller.navigationBar.scrollEdgeAppearance = appearance;
+    controller.navigationBar.compactAppearance = appearance;
     if (@available(iOS 11, *)) {
 
         [controller.navigationBar setLargeTitleTextAttributes:nil];
     }
 }
 
-- (void)_getCurrentNavigationStack {
-    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"SELF != %@", _blankListController];
-    NSArray *viewControllers = [_rootController.viewControllers filteredArrayUsingPredicate:predicate];
-    _navigationStack = viewControllers;
+- (void)_assignRootController:(PSRootController *)rootController toControllers:(NSArray<UIViewController *> *)controllers {
+    for (UIViewController *controller in controllers) {
+        if ([controller isKindOfClass:PSViewController.class]) [(PSViewController *)controller setRootController:rootController];
+    }
 }
 
 @end

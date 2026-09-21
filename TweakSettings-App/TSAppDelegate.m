@@ -13,6 +13,8 @@
 #import "Localizable.h"
 #import "TSRootNavigationManager.h"
 #import "TSUserDefaults.h"
+#import "../Shared/TSUtilitySupport.h"
+#import "../Shared/TSPreferenceSupport.h"
 
 
 static void HandleExceptions(NSException *exception) {
@@ -34,6 +36,9 @@ static void HandleExceptions(NSException *exception) {
             [[UIApplicationShortcutItem alloc] initWithType:TSActionTypeRespring localizedTitle:NSLocalizedString(RESPRING_TITLE_KEY, nil) localizedSubtitle:NSLocalizedString(RESPRING_SUBTITLE_KEY, nil) icon:nil userInfo:nil]
     ];
 
+    application.shortcutItems = [application.shortcutItems filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(UIApplicationShortcutItem *item, NSDictionary *bindings) {
+        return TSActionIsAvailable(item.type.UTF8String);
+    }]];
     _navigationManager = [TSRootNavigationManager new];
 
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -47,7 +52,9 @@ static void HandleExceptions(NSException *exception) {
 
     if (launchOptions[UIApplicationLaunchOptionsShortcutItemKey]) {
 
-        [self handleActionForType:[(UIApplicationShortcutItem *)launchOptions[UIApplicationLaunchOptionsShortcutItemKey] type]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handleActionForType:[(UIApplicationShortcutItem *)launchOptions[UIApplicationLaunchOptionsShortcutItemKey] type]];
+        });
         return NO;
     }
 
@@ -55,7 +62,8 @@ static void HandleExceptions(NSException *exception) {
 
         [self.navigationManager.rootListController setShowOnLoad:NO];
         [self.navigationManager setDeferredLoadURL:launchOptions[UIApplicationLaunchOptionsURLKey]];
-        return NO;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self.navigationManager processDeferredURL:NO]; });
+        return YES;
     }
 
     return YES;
@@ -63,43 +71,38 @@ static void HandleExceptions(NSException *exception) {
 
 - (BOOL)application:(UIApplication *)application openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options {
 
-    if ([url.scheme isEqualToString:@"tweaks"]) {
-
-        if (self.navigationManager.rootListController.rootListLoaded) {
-
-            [self.navigationManager processURL:url animated:YES];
-        }
-
-        return YES;
-    }
-
-    return NO;
+    if (!TSPreferenceIdentifiers(url)) return NO;
+    [self.navigationManager processURL:url animated:YES];
+    return YES;
 }
 
 - (void)application:(UIApplication *)application performActionForShortcutItem:(UIApplicationShortcutItem *)shortcutItem completionHandler:(void (^)(BOOL))completionHandler {
 
     [self handleActionForType:shortcutItem.type];
-    completionHandler(YES);
+    completionHandler(TSIsKnownAction(shortcutItem.type.UTF8String));
 }
 
 - (BOOL)application:(UIApplication *)application continueUserActivity:(NSUserActivity *)userActivity restorationHandler:(void (^)(NSArray<id<UIUserActivityRestoring>> *))restorationHandler {
 
     if ([userActivity.activityType isEqualToString:CSSearchableItemActionType]) {
         NSURL *launchURL = [NSURL URLWithString:userActivity.userInfo[CSSearchableItemActivityIdentifier]];
+        if (!TSPreferenceIdentifiers(launchURL)) return NO;
         [self.navigationManager processURL:launchURL animated:NO];
+        return YES;
     }
 
-    return YES;
+    return NO;
 }
 
 #pragma mark - Public Methods
 
 - (void)presentAsPopover:(UIViewController *)controller withSender:(id)sender {
 
+    if (!controller) return;
     if (sender == nil) sender = _navigationManager.rootListController.navigationItem.rightBarButtonItem;
     self.popoverSender = sender;
 
-    controller.modalPresentationStyle = UIModalPresentationPopover;
+    if (![controller isKindOfClass:UIAlertController.class]) controller.modalPresentationStyle = UIModalPresentationPopover;
 
     if (sender && [sender isKindOfClass:UIBarButtonItem.class]) {
         controller.popoverPresentationController.barButtonItem = sender;
@@ -110,14 +113,24 @@ static void HandleExceptions(NSException *exception) {
         controller.popoverPresentationController.permittedArrowDirections = (UIPopoverArrowDirection)0;
     }
 
-    [_navigationManager.rootListController presentViewController:controller animated:YES completion:nil];
+    if (controller.popoverPresentationController && !controller.popoverPresentationController.barButtonItem && !controller.popoverPresentationController.sourceView) {
+        UIView *view = self.window.rootViewController.view;
+        controller.popoverPresentationController.sourceView = view;
+        controller.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(view.bounds), CGRectGetMidY(view.bounds), 1, 1);
+        controller.popoverPresentationController.permittedArrowDirections = 0;
+    }
+    [self presentViewController:controller];
 }
 
 - (void)presentViewController:(UIViewController *)controller {
-    [_navigationManager.topNavigationController presentViewController:controller animated:YES completion:nil];
+    if (!controller) return;
+    UIViewController *presenter = self.window.rootViewController;
+    while (presenter.presentedViewController && !presenter.presentedViewController.isBeingDismissed) presenter = presenter.presentedViewController;
+    [presenter presentViewController:controller animated:YES completion:nil];
 }
 
 - (void)handleActionForType:(NSString *)actionType {
+    if (!TSIsKnownAction(actionType.UTF8String)) return;
 
     if (CanRunWithoutConfirmation(actionType) && !TSUserDefaults.sharedDefaults.requireActionConfirmation) {
 
@@ -131,17 +144,18 @@ static void HandleExceptions(NSException *exception) {
 
 - (void)openApplicationURL:(NSURL *)url {
 
+    if (!url) return;
     void (*SBSOpenSensitiveURLAndUnlock)(NSURL *, BOOL);
     if ((SBSOpenSensitiveURLAndUnlock = (void (*)(NSURL *, BOOL)) dlsym(RTLD_DEFAULT, "SBSOpenSensitiveURLAndUnlock"))) {
         (*SBSOpenSensitiveURLAndUnlock)(url, YES);
     } else if (@available(iOS 10,*)) {
-        [self openURL:url options:@{} completionHandler:nil];
+        [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
     }
 }
 
 - (void)generateURL {
     NSURL *url = [self.navigationManager urlForCurrentNavStack];
-    [NSUserDefaults.standardUserDefaults setObject:url.absoluteString forKey:@"kPreferencePositionKey"];
+    if (url) [NSUserDefaults.standardUserDefaults setObject:url.absoluteString forKey:@"kPreferencePositionKey"];
 }
 
 @end

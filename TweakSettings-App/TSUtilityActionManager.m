@@ -11,7 +11,12 @@
 #import "Localizable.h"
 #import "TSAppDelegate.h"
 #import "rootless.h"
-#import "NSTask.h"
+#import <spawn.h>
+#import <sys/wait.h>
+#import <fcntl.h>
+#import <errno.h>
+#import <sysexits.h>
+#import "../Shared/TSUtilitySupport.h"
 
 NSString *const TSActionTypeRespring = @"respring";
 NSString *const TSActionTypeSafemode = @"safemode";
@@ -21,47 +26,62 @@ NSString *const TSActionTypeReboot = @"reboot";
 NSString *const TSActionTypeUserspaceReboot = @"usreboot";
 NSString *const TSActionTypeTweakInject = @"tweakinject";
 
-struct TaskResult ExecuteCommand(NSString *command) {
-    NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:ROOT_PATH_NS(@"/bin/sh")];
-    [task setArguments:@[@"-c", command]];
-
-    NSPipe *outputPipe = [NSPipe pipe];
-    [task setStandardOutput:outputPipe];
-
-    NSPipe *errorPipe = [NSPipe pipe];
-    [task setStandardError:errorPipe];
-
-    [task launch];
-    [task waitUntilExit];
-
-    NSData *errorData;
-    NSData *outputData;
-    NSString *output;
-    NSString *error;
-
-    if (@available(iOS 13.0, *)) {
-        outputData = [[[task standardOutput] fileHandleForReading] readDataToEndOfFileAndReturnError:nil];
-        errorData = [[[task standardError] fileHandleForReading] readDataToEndOfFileAndReturnError:nil];
-    } else {
-        outputData = [[[task standardOutput] fileHandleForReading] readDataToEndOfFile];
-        errorData = [[[task standardError] fileHandleForReading] readDataToEndOfFile];
+struct TaskResult ExecuteAction(NSString *actionType) {
+    struct TaskResult result = {.status = EX_USAGE, .output = nil, .error = nil};
+    if (!TSIsKnownAction(actionType.UTF8String)) {
+        result.error = @"Unknown action.";
+        return result;
     }
-
-    if (outputData && outputData.length > 0) {
-        output =  [[NSString alloc] initWithData:outputData encoding:NSASCIIStringEncoding];
+    int descriptors[2];
+    if (pipe(descriptors) != 0) {
+        result.status = errno;
+        result.error = [NSString stringWithUTF8String:strerror(errno)];
+        return result;
     }
-
-    if (errorData && errorData.length > 0) {
-        error = [[NSString alloc] initWithData:errorData encoding:NSASCIIStringEncoding];
-        NSLog(@"TweakSettings: TASK INPUT: %@ ERROR: %@, STATUS: %d", task.arguments.lastObject, error, task.terminationStatus);
+    fcntl(descriptors[0], F_SETFD, FD_CLOEXEC);
+    fcntl(descriptors[1], F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t fileActions;
+    int status = posix_spawn_file_actions_init(&fileActions);
+    BOOL initialized = status == 0;
+    if (!status) status = posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!status) status = posix_spawn_file_actions_adddup2(&fileActions, descriptors[1], STDOUT_FILENO);
+    if (!status) status = posix_spawn_file_actions_adddup2(&fileActions, descriptors[1], STDERR_FILENO);
+    if (!status) status = posix_spawn_file_actions_addclose(&fileActions, descriptors[0]);
+    if (!status) status = posix_spawn_file_actions_addclose(&fileActions, descriptors[1]);
+    NSString *path = ROOT_PATH_NS(@"/usr/bin/tweaksettings-utility");
+    if (!path) status = ENOENT;
+    NSString *argument = [@"--" stringByAppendingString:actionType];
+    char *arguments[] = {(char *)path.fileSystemRepresentation, (char *)argument.UTF8String, NULL};
+    char *environment[] = {"PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin", "LANG=C", NULL};
+    pid_t pid = -1;
+    if (!status) status = posix_spawn(&pid, path.fileSystemRepresentation, &fileActions, NULL, arguments, environment);
+    if (initialized) posix_spawn_file_actions_destroy(&fileActions);
+    close(descriptors[1]);
+    if (status) {
+        close(descriptors[0]);
+        result.status = status;
+        result.error = [NSString stringWithUTF8String:strerror(status)];
+        return result;
     }
-
-    struct TaskResult result;
-    result.status = task.terminationStatus;
-    result.output = output;
-    result.error = error;
-
+    // Drain stdout and stderr together before waiting: a full pipe must not deadlock the child.
+    NSMutableData *output = [NSMutableData data];
+    char buffer[4096];
+    ssize_t count;
+    while ((count = read(descriptors[0], buffer, sizeof(buffer))) != 0) {
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        NSUInteger remaining = 65536 - output.length;
+        if (remaining) [output appendBytes:buffer length:MIN((NSUInteger)count, remaining)];
+    }
+    close(descriptors[0]);
+    int waitStatus = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &waitStatus, 0); } while (waited < 0 && errno == EINTR);
+    result.status = waited < 0 ? errno : WIFEXITED(waitStatus) ? WEXITSTATUS(waitStatus) : 128 + WTERMSIG(waitStatus);
+    result.output = [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding];
+    if (result.status) result.error = result.output.length ? result.output : [NSString stringWithFormat:@"Action failed (status %d).", result.status];
     return result;
 }
 
@@ -88,104 +108,68 @@ NSString *SubtitleForActionType(NSString *type) {
 }
 
 BOOL CanRunWithoutConfirmation(NSString *actionType) {
+    return TSIsKnownAction(actionType.UTF8String) &&
+        ![actionType isEqualToString:TSActionTypeReboot] &&
+        ![actionType isEqualToString:TSActionTypeLDRestart] &&
+        ![actionType isEqualToString:TSActionTypeUserspaceReboot] &&
+        ![actionType isEqualToString:TSActionTypeTweakInject];
+}
 
-    if (!actionType || !actionType.length) return NO;
-    return !([actionType isEqualToString:TSActionTypeReboot]
-        || [actionType isEqualToString:TSActionTypeLDRestart]
-        || [actionType isEqualToString:TSActionTypeUserspaceReboot]);
-};
-
-int HandleActionForType(NSString *actionType) {
-
-    if (!actionType || !actionType.length) return EXIT_FAILURE;
-
-    int status = ExecuteCommand(CommandForActionType(actionType)).status;
-
-    return status;
+void HandleActionForType(NSString *actionType) {
+    // All callers are UI handlers. Serialize actions and keep process I/O off the main thread.
+    static BOOL actionRunning = NO;
+    if (actionRunning || !TSIsKnownAction(actionType.UTF8String)) return;
+    actionRunning = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        struct TaskResult result = ExecuteAction(actionType);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            actionRunning = NO;
+            if (result.status != 0) {
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:NSLocalizedString(@"ACTION_FAILED_TITLE", nil) message:result.error preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(ALERT_DISMISS_TITLE_KEY, nil) style:UIAlertActionStyleCancel handler:nil]];
+                [APP_DELEGATE presentViewController:alert];
+            }
+        });
+    });
 }
 
 UIAlertController *ActionAlertForType(NSString *actionType) {
-
+    if (!TSIsKnownAction(actionType.UTF8String)) return nil;
     NSString *title = TitleForActionType(actionType);
     NSString *message = [NSString stringWithFormat:NSLocalizedString(ALERT_ACTION_MESSAGE_KEY, nil), SubtitleForActionType(actionType)];
     UIAlertController *controller = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-
-    [controller addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [controller addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         HandleActionForType(actionType);
     }]];
     [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(ALERT_CANCEL_TITLE_KEY, nil) style:UIAlertActionStyleCancel handler:nil]];
-
     return controller;
+}
+
+static NSArray<NSString *> *AvailableActions(void) {
+    NSArray *actions = @[TSActionTypeRespring, TSActionTypeSafemode, TSActionTypeUICache, TSActionTypeLDRestart,
+                         TSActionTypeReboot, TSActionTypeUserspaceReboot, TSActionTypeTweakInject];
+    return [actions filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *action, NSDictionary *bindings) {
+        return TSActionIsAvailable(action.UTF8String);
+    }]];
 }
 
 UIAlertController *ActionListAlert(void) {
-
-    BOOL userspace_supported = access(ROOT_PATH("/odyssey/jailbreakd.plist"), F_OK) == 0 || access(ROOT_PATH("/taurine/jailbreakd.plist"), F_OK) == 0;
     UIAlertController *controller = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(RESPRING_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeRespring];
-    }]];
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(SAFEMODE_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeSafemode];
-    }]];
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(UICACHE_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeUICache];
-    }]];
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(LDRESTART_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeLDRestart];
-    }]];
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(REBOOT_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeReboot];
-    }]];
-    if (userspace_supported) {
-        [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(USREBOOT_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [APP_DELEGATE handleActionForType:TSActionTypeUserspaceReboot];
+    for (NSString *type in AvailableActions()) {
+        [controller addAction:[UIAlertAction actionWithTitle:TitleForActionType(type) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [APP_DELEGATE handleActionForType:type];
         }]];
     }
-    [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(TWEAKINJECT_TITLE_KEY, nil) style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeTweakInject];
-    }]];
     [controller addAction:[UIAlertAction actionWithTitle:NSLocalizedString(ALERT_CANCEL_TITLE_KEY, nil) style:UIAlertActionStyleCancel handler:nil]];
-
     return controller;
 }
 
-UIMenu *ActionListMenu(void) API_AVAILABLE(ios(13.0)) {
-
-    NSMutableArray *menuActions = [NSMutableArray new];
-    BOOL userspace_supported =
-            access(ROOT_PATH("/odyssey/jailbreakd.plist"), F_OK) == 0 ||
-            access(ROOT_PATH("/taurine/jailbreakd.plist"), F_OK) == 0 ||
-            access(ROOT_PATH("/.installed_dopamine"), F_OK) == 0;
-
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(RESPRING_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeRespring];
-    }]];
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(SAFEMODE_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeSafemode];
-    }]];
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(UICACHE_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeUICache];
-    }]];
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(LDRESTART_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeLDRestart];
-    }]];
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(REBOOT_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeReboot];
-    }]];
-    if (userspace_supported) {
-        [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(USREBOOT_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-            [APP_DELEGATE handleActionForType:TSActionTypeUserspaceReboot];
+UIMenu *ActionListMenu(void) {
+    NSMutableArray *actions = [NSMutableArray array];
+    for (NSString *type in AvailableActions()) {
+        [actions addObject:[UIAction actionWithTitle:TitleForActionType(type) image:nil identifier:nil handler:^(__kindof UIAction *action) {
+            [APP_DELEGATE handleActionForType:type];
         }]];
     }
-    [menuActions addObject:[UIAction actionWithTitle:NSLocalizedString(TWEAKINJECT_TITLE_KEY, nil) image:nil identifier:nil handler:^(__kindof UIAction *action) {
-        [APP_DELEGATE handleActionForType:TSActionTypeTweakInject];
-    }]];
-
-    return [UIMenu menuWithTitle:@"" children:menuActions];
-}
-
-NSString *CommandForActionType(NSString *actionType) {
-    return [NSString stringWithFormat:ROOT_PATH_NS(@"/usr/bin/tweaksettings-utility --%@"), actionType];
+    return [UIMenu menuWithTitle:@"" children:actions];
 }

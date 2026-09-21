@@ -13,7 +13,7 @@
 
 #define APP_DELEGATE ((TSAppDelegate *) UIApplication.sharedApplication.delegate)
 
-@interface TSAppDelegate : UIApplication <UIApplicationDelegate>
+@interface TSAppDelegate : UIResponder <UIApplicationDelegate>
 
 @property(strong, nonatomic) UIWindow *window;
 @property(nonatomic, weak) id popoverSender;

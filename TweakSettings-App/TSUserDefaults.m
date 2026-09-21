@@ -15,7 +15,6 @@ static void ReceivedNotification(CFNotificationCenterRef center, void *observer,
 @implementation TSUserDefaults {
     NSString *_bundleIdentifier;
     NSString *_preferencesChangedIdentifier;
-    NSString *_preferencePath;
 }
 
 + (instancetype)sharedDefaults {
@@ -33,7 +32,6 @@ static void ReceivedNotification(CFNotificationCenterRef center, void *observer,
 
         _bundleIdentifier = @"com.creaturecoding.tweaksettings";
         _preferencesChangedIdentifier = @"com.creaturecoding.tweaksettings/changed";
-        _preferencePath = [NSHomeDirectory() stringByAppendingFormat:@"/Library/Preferences/%@.plist", _bundleIdentifier];
 
         _defaults = NSUserDefaults.standardUserDefaults;
         
@@ -108,17 +106,21 @@ static void ReceivedNotification(CFNotificationCenterRef center, void *observer,
 - (void)_preferenceNotificationReceived {
 
     [self synchronize];
-    [NSNotificationCenter.defaultCenter postNotificationName:TSUserDefaultsChangedKey object:nil];
+    MAIN_QUEUE(^{ [NSNotificationCenter.defaultCenter postNotificationName:TSUserDefaultsChangedKey object:nil]; });
 }
 
 - (void)_setDefaults {
 
-    NSUserDefaults *defaults = self.defaults;
+    [self.defaults registerDefaults:@{
+        UseLargeTitlesOnRootListKey: @YES,
+        AlwaysShowSearchBarKey: @NO,
+        RequireActionConfirmationKey: @YES,
+        LongPressOpensSettingsKey: @YES
+    }];
+}
 
-    if (![defaults objectForKey:UseLargeTitlesOnRootListKey]) [defaults setBool:YES forKey:UseLargeTitlesOnRootListKey];
-    if (![defaults objectForKey:AlwaysShowSearchBarKey]) [defaults setBool:NO forKey:AlwaysShowSearchBarKey];
-    if (![defaults objectForKey:RequireActionConfirmationKey]) [defaults setBool:YES forKey:RequireActionConfirmationKey];
-    if (![defaults objectForKey:LongPressOpensSettingsKey]) [defaults setBool:YES forKey:LongPressOpensSettingsKey];
+- (void)dealloc {
+    CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(), (__bridge void *)self);
 }
 
 @end

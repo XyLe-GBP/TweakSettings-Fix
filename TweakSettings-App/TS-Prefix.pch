@@ -33,6 +33,7 @@ NS_INLINE __unused void HIGH_QUEUE(void (^block)(void)) {
 }
 
 NS_INLINE __unused NSObject *OBJECT_WITH_PLIST_OPTIONS(NSString *path, NSPropertyListReadOptions options) {
+    if (![path isKindOfClass:NSString.class] || !path.length) return nil;
     NSError *err1, *err2;
     NSData *plistData = [NSData dataWithContentsOfFile:path options:(NSDataReadingOptions) 0 error:&err1];
     if (plistData && !err1) {

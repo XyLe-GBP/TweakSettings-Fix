@@ -8,7 +8,7 @@
 
 #import "TSSearchableListController.h"
 
-@interface TSRootListController : TSSearchableListController
+@interface TSRootListController : TSSearchableListController <UIGestureRecognizerDelegate>
 
 @property (nonatomic, assign) BOOL rootListLoaded;
 

@@ -18,8 +18,9 @@
 - (UITableViewStyle)tableViewStyle;
 
 @property (nonatomic, retain) UITableView *view;
-@property (nonatomic, retain) UITableView *table; // 3.0 - 6.0
-@property (nonatomic, retain) UITableView *tableView;
+// PSListController is a PSViewController, not a UITableViewController.
+// Its iOS 17 runtime exposes -table, not -tableView or either setter.
+@property (nonatomic, readonly) UITableView *table;
 
 - (PSSpecifier *)specifierAtIndex:(NSInteger)index;
 - (PSSpecifier *)specifierAtIndexPath:(NSIndexPath *)indexPath;
