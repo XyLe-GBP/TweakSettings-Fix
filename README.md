@@ -1,17 +1,28 @@
-# Tweak Settings
-A dedicated settings app for tweak preferences
+# TweakSettings
+
+Tweak の設定をまとめて開ける専用アプリです。
+[CreatureSurvive/TweakSettings](https://github.com/CreatureSurvive/TweakSettings) をもとに、iOS 17 の rootless 環境向けに修正しています。
 
 ![preview](Resources/icon_large.png)
 
-## Rootless compatibility build (1.0.9)
+## 動作確認済みの環境
 
-対象: **iOS 17.3 / arm64e / Dopamine / ElleKit / rootless**。
-アプリとヘルパーはarm64＋arm64e、最低OSはiOS 15.0です。
+**バージョン 1.0.9** は、以下の実機環境で動作確認済みです。インストール後、ホーム画面から正常に起動することを確認しています。
 
-ビルド・回帰テスト・deb検査を行っています。**iOS 17.3実機での動作確認は未実施**です。
-変更内容・既知の制限・実機確認手順は [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) を参照してください。
+| 項目 | 環境 |
+| --- | --- |
+| 端末 | iPhone 15 Pro Max |
+| iOS | 17.3 |
+| アーキテクチャ | arm64e |
+| 脱獄 | Dopamine 3.0.9 |
+| Tweak 注入 | ElleKit |
+| 構成 | rootless |
 
-macOS、選択済みのXcode、最新のTheos（librootを含む）、ldidが必要です。
+起動時のクラッシュを修正したほか、設定一覧や検索、rootless のパス処理、再起動などの操作を見直しています。詳しい変更内容は [互換性と修正内容](docs/COMPATIBILITY.md) を参照してください。
+
+## ビルドとインストール
+
+macOS、Xcode、libroot を含む Theos、ldid、Python 3 が必要です。使用する Xcode を `xcode-select` で選択してから実行してください。
 
 ```sh
 export THEOS=/path/to/theos
@@ -20,12 +31,17 @@ export THEOS=/path/to/theos
 python3 Tests/validate_package.py
 ```
 
-生成物: `Releases/com.creaturecoding.tweaksettings_1.0.9_iphoneos-arm64.deb`
+生成されるパッケージ:
 
-脱獄済み端末へ転送し、Sileoなどのパッケージマネージャーでインストールしてください。
-設定を表示する各Tweakと依存ライブラリにも、対象OS・rootlessへの対応が必要です。
+```text
+Releases/com.creaturecoding.tweaksettings_1.0.9_iphoneos-arm64.deb
+```
 
-# Author
+アプリとヘルパーには `arm64` と `arm64e` の両方を含みます。ビルド上の最低 OS バージョンは iOS 15.0 です。
+
+生成した `.deb` を脱獄済み端末に転送し、Sileo などのパッケージマネージャーでインストールしてください。各 Tweak とその依存ライブラリも、使用する iOS と rootless に対応している必要があります。
+
+## オリジナルの作者
 
 Dana Buehre (CreatureSurvive)
 [cs@creaturecoding.com](mailto:cs@creaturecoding.com)
